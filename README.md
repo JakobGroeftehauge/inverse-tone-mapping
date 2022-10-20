@@ -1,1 +1,1 @@
-# inverse-tone-mapping
+# Inverse Tone Mapping
