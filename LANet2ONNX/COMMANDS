@@ -1,0 +1,5 @@
+## Convert Checkpoint to ONNX-model
+python3 -m tf2onnx.convert --checkpoint /home/jakob/Documents/Pixop-Projects/checkpoint_LANet/LANet.ckpt-0.meta --output model_noSym.onnx --inputs test_L:0 --outputs generator/out/Conv/Conv2D:0 --opset 10
+
+
+polygraphy run model_noSym.onnx --trt
