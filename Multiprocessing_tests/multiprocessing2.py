@@ -1,3 +1,4 @@
+#%%writefile test.py
 import multiprocessing
 import queue
 import time
@@ -7,10 +8,15 @@ import numpy as np
 import cv2
 import ctypes
 from time import sleep
-from multiprocessing import Manager
 import logging
 import multiprocessing_logging
 import argparse
+
+def create_logger(name): 
+    logging.basicConfig(filename=name, format='%(asctime)s:%(msecs)03d: %(levelname)s: %(name)s: %(message)s',level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
+    logger = logging.getLogger()
+    return logger
+
 
 def setup_decoder(input_pth): 
     decoder = (ffmpeg.input(input_pth).output('pipe:', format='rawvideo', loglevel='quiet', pix_fmt='rgb24').run_async(pipe_stdout=True))
@@ -50,7 +56,7 @@ def transformPQ(arr):
   
 
 def video_data(filename): 
-    import ffmpeg
+    print("filename: ", filename)
     probe = ffmpeg.probe(filename)
     video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
     width = int(video_stream['width'])
@@ -58,7 +64,7 @@ def video_data(filename):
     fps = int(video_stream['r_frame_rate'].split('/')[0])
     num_frames= int(video_stream['nb_frames'])
     return [width, height], fps, num_frames
-  
+    
 
 def run(d, ind, num, decQ, encQ):  
     dec = multiprocessing.Process(target=pre_process, args=(d,ind, num, decQ, ))
@@ -76,74 +82,86 @@ def run(d, ind, num, decQ, encQ):
 
 
 def pre_process(d, ind, num, decQ): 
-    logging.info('Pre-Process/decode process started')
+    logger = create_logger(d["logger_name"])
+    logger.info('Pre-Process/decode process started')
     decoder = setup_decoder(d["input_pth"])
     for i in progressbar(range(d["n_frames"])):
-      logging.debug("Frame decoding initiated")
+      logger.debug("Frame decoding initiated")
       in_bytes = decoder.stdout.read(d["size"])
-      logging.debug('Frame decoded')
+      logger.debug('Frame decoded')
       img = np.frombuffer(in_bytes, np.uint8).reshape(d["arr_shape"])
       img = np.maximum(1.0, img)
       img = sRGB2linear(img)
       img = img * 2 - 1
-      img = img.astype(ctypes.c_float)
+      img = img.astype(np.float32)
       idx = get_index_indicator(ind)
-      num[idx] = img.ravel()
-      #num[idx*d["size"]: idx*d["size"] + d["size"]] = img.ravel()
+      #print("max preprocess: ", img.max())
+
+      np.copyto(num[idx], img)
       decQ.put(idx)
-      logging.debug("Index added to decodeQueue")
+      logger.debug("Index added to decodeQueue")
     
     decQ.put(None)
     decoder.wait()
     return 
 
-def post_process(d, num, ind, encQ): 
-    logging.info('Post-Process/encode process started')
+def post_process(d, num, ind, encQ):
+    logger = create_logger(d["logger_name"])
+    logger.info('Post-Process/encode process started')
     encoder = setup_encoder(d["output_pth"], d["width"], d["height"], d["fps"])
     while True:
       idx = encQ.get() 
-      logging.debug("Item retrieved from encodeQueue")
+      logger.debug("Item retrieved from encodeQueue")
       if idx is None: 
         break
-      img = np.frombuffer(num[idx], dtype=ctypes.c_float).reshape(d["arr_shape"])
+      img = np.frombuffer(num[idx], dtype=np.float32).reshape(d["arr_shape"])
 
       #img = np.asarray(num[idx*d["size"]:idx*d["size"] + d["size"]]).reshape(d["arr_shape"])
       img = np.exp(img)
       img = transformPQ(img * d["sc"])
       img = img * 65535
-      logging.debug('Write to encoder initiated')
+      logger.debug('Write to encoder initiated')
       encoder.stdin.write(img.astype(np.uint16).tobytes())
-      logging.debug('Write to encoder finshed')
+      logger.debug('Write to encoder finshed')
       ind[idx] = 0
 
-    logging.debug("Initiated closing of encoder")
+    logger.debug("Initiated closing of encoder")
     encoder.stdin.close()
     encoder.wait()
-    logging.debug("Encoder closed")
+    logger.debug("Encoder closed")
     return 
 
 
 def LANet(d, num, encQ, decQ): 
     #Input: RGB-image [h, w, 3]
     #Output: PQ encoded RGB-image
-    logging.basicConfig(filename=opt.log, format='%(asctime)s:%(msecs)03d: %(levelname)s: %(name)s: %(message)s',level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
-    logging.info('LANet process started')
-    import onnxruntime as onnxrt
-    session = onnxrt.InferenceSession(d["model_pth"], None, providers=d["providers"])
+    import time
+    logger = create_logger(d["logger_name"])
+    logger.info('LANet process started')
+    if not d["disable_onnx"]:
+      import onnxruntime as onnxrt
+      session = onnxrt.InferenceSession(d["model_pth"], None, providers=d["providers"])
     while True: 
-      logging.debug("decQ size: {} encQ size: {}".format(decQ.qsize(), encQ.qsize()))
+      logger.debug("decQ size: {} encQ size: {}".format(decQ.qsize(), encQ.qsize()))
       idx = decQ.get()
       if idx is None: 
         break
-      input = np.frombuffer(num[idx], dtype=ctypes.c_float).reshape([1] + d["arr_shape"]).astype(np.float32)
-      #print(input.shape)
-      #input = np.expand_dims(np.asarray(num[idx*d["size"]:idx*d["size"] + d["size"]]).reshape(d["arr_shape"]), axis=0).astype(np.float32)
-      onnx_inputs = {session.get_inputs()[0].name: input}
-      logging.debug('Inference started')
-      onnx_output = session.run(None, onnx_inputs)
-      logging.debug('Inference Stopped')
-      output = onnx_output[0].astype(ctypes.c_float)
-      num[idx] = output.ravel()
+      frame = np.frombuffer(num[idx], dtype=np.float32).reshape([1] + d["arr_shape"])
+      #print("max lanet: ", frame.max())
+
+      logger.debug('Inference started')
+      if d["disable_onnx"]:
+        output = frame.reshape(d["arr_shape"])
+        time.sleep(0.5)
+      else:
+        onnx_inputs = {session.get_inputs()[0].name: frame}
+        onnx_output = session.run(None, onnx_inputs)
+        output = onnx_output[0].astype(np.float32)
+
+      logger.debug('Inference Stopped')
+      #output = frame.astype(np.float32)
+      np.copyto(num[idx], output)
+      #num[idx] = output.ravel()
       #num[idx*d["size"]: idx*d["size"] + d["size"]] = output.ravel()
       encQ.put(idx)
 
@@ -152,10 +170,11 @@ def LANet(d, num, encQ, decQ):
 
 def parse_opt(known=False):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-file', dest="input", type=str, help='Path to HDR image to transform')
-    parser.add_argument('--output-filename', dest="output", type=str, help='Path to store frames')
-    parser.add_argument('--model', type=str, help="path to inference ONNX-model")
-    parser.add_argument('--logging-file', dest="log", default="debug_process.log", type=str, help="name of logging file" )
+    parser.add_argument('-input-file', dest="input", type=str, help='Path to HDR image to transform')
+    parser.add_argument('-output-filename', dest="output", type=str, help='Path to store frames')
+    parser.add_argument('-model', type=str, help="path to inference ONNX-model")
+    parser.add_argument('-logging-file', dest="log", default="debug_process.log", type=str, help="name of logging file" )
+    parser.add_argument('--disable-onnx', dest='disable_onnx', type=bool, default=False, help="disable onnx for debugging on computer wit limited resources")
     opt = parser.parse_known_args()[0] if known else parser.parse_args()
     return opt
 
@@ -165,37 +184,41 @@ if __name__ == '__main__':
   #multiprocessing.set_start_method('spawn')
   opt = parse_opt(True)
 
-  logging.basicConfig(filename=opt.log, format='%(asctime)s:%(msecs)03d: %(levelname)s: %(name)s: %(message)s',level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
   multiprocessing_logging.install_mp_handler()
-  logging.debug("Start of program2")
+  logger = create_logger(opt.log)
+  logger.debug("Start of program2")
   
-  data = Manager().dict()
+  data = multiprocessing.Manager().dict()
   print("Model: ", opt.model, " input: ", opt.input, " output: ", opt.output)
-  data["log_file"] = opt.log
+  data["disable_onnx"] = opt.disable_onnx
+  data["logger_name"] = opt.log
   data["model_pth"] = opt.model
   data["sc"] = 20 #pre-scaling
-  data["output_pth"] = opt.input
-  data["input_pth"] = opt.output
+  data["output_pth"] = opt.output
+  data["input_pth"] = opt.input
 
-  data["providers"] = ["CUDAExecutionProvider", 'CPUExecutionProvider']
-  [data["width"], data["height"]], data["fps"], data["n_frames"] = video_data(data["input_pth"])
+  data["providers"] = ["TensorrtExecutionProvider", "CUDAExecutionProvider", 'CPUExecutionProvider']
+  [data["width"], data["height"]], data["fps"], data["n_frames"] = video_data(opt.input)
 
   decodeQueue = multiprocessing.Queue(maxsize=3)
   encodeQueue = multiprocessing.Queue(maxsize=3)
 
   data["size"] = int(data["width"] * data["height"]*3) # size of array
   data["N_numbers"] = int(6)
-  tmp = int(data["size"] * data["N_numbers"])
-  data_arrays = []
-
-  for i in range(data["N_numbers"]): 
-      data_arrays.append(multiprocessing.RawArray(ctypes.c_float, int(data["size"])))
-
-  indicator= multiprocessing.Array(ctypes.c_long,[0] * data["N_numbers"], lock=False)
   data["arr_shape"] = [data["height"], data["width"], 3]
 
+  data_arrays = []
+  data_arrays_np = []
+  for i in range(data["N_numbers"]): 
+      arr = multiprocessing.RawArray(ctypes.c_float, int(data["size"]))
+      data_arrays.append(arr)
+      data_arrays_np.append(np.frombuffer(arr, dtype=np.float32).reshape(data["arr_shape"]))
+
+  
+  indicator= multiprocessing.Array(ctypes.c_long,[0] * data["N_numbers"], lock=False)
+
   t1 = time.time()
-  run(data, indicator, data_arrays, decodeQueue, encodeQueue)
+  run(data, indicator, data_arrays_np, decodeQueue, encodeQueue)
   t2 = time.time()
   t = t2-t1
   print("Avg. Per Image: ", str(t/data["n_frames"]))
