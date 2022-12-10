@@ -30,12 +30,13 @@ class PipelineParams:
 
     providers: list = None # Execution providers for ONNX inference
     N_numbers: int = 6  # Number of 
-    disable_onnx: bool = False      # disable onnx calls, used for debugging on hardware without GPU. 
+    disable_model: bool = False      # disable onnx calls, used for debugging on hardware without GPU. 
     logger_name: str = "debug.log"  # Name of the debug log
     sc: float = 20 #
     max_luminance: int = 1000
 
     # Automatically initalised variables:
+    model_type: str = None 
     width: int = None
     height: int = None
     fps: float = None
@@ -47,6 +48,8 @@ class PipelineParams:
       self.width, self.height, self.fps, self.n_frames = self.extract_video_data()
       self.size = self.width * self.height * 3
       self.arr_shape = [self.height, self.width, 3]
+      if not self.disable_model:
+        self.get_model_type()
       if self.providers is None:
         self.providers = ["TensorrtExecutionProvider", "CUDAExecutionProvider", 'CPUExecutionProvider']
       
@@ -59,3 +62,12 @@ class PipelineParams:
       fps = int(video_stream['r_frame_rate'].split('/')[0])
       num_frames= int(video_stream['nb_frames'])
       return width, height, fps, num_frames
+    
+    def get_model_type(): 
+        ending = self.model_pth.split("/")[-1].split(".")[-1]
+        if ending is "plan" or "onnx":
+            self.model_type = ending
+        else:
+            raise ValueError("Unknown model type")
+
+    
