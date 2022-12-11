@@ -63,7 +63,7 @@ class PipelineParams:
       num_frames= int(video_stream['nb_frames'])
       return width, height, fps, num_frames
     
-    def get_model_type(): 
+    def get_model_type(self): 
         ending = self.model_pth.split("/")[-1].split(".")[-1]
         if ending is "plan" or "onnx":
             self.model_type = ending

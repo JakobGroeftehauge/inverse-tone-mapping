@@ -5,9 +5,11 @@ import tensorrt as trt
 
 
 class TensorRT_model:
-    def __init__(self, plan_pth, shape):
+    def __init__(self, plan_pth, shape, dtype=np.float32):
 
-        with open(model_pth, "rb") as fp:
+        self.dtype = dtype
+
+        with open(plan_pth, "rb") as fp:
           plan_model = fp.read()
 
         # initialize the TensorRT objects
@@ -17,10 +19,10 @@ class TensorRT_model:
         self.context = self.engine.create_execution_context()
         self.context.set_input_shape("input", shape)
         
-        self.n_bytes = int(np.dtype(np.float32).itemsize * np.prod(shape))
+        self.n_bytes = int(np.dtype(self.dtype).itemsize * np.prod(shape))
 
         # create device buffers and TensorRT bindings
-        self.output = np.zeros(shape, dtype=np.float32)
+        self.output = np.zeros(shape, dtype=self.dtype)
         self.d_input  = cuda.mem_alloc(self.n_bytes)
         self.d_output = cuda.mem_alloc(self.n_bytes)
         self.bindings = [self.d_input, self.d_output]
