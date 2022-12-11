@@ -8,7 +8,6 @@ import multiprocessing_logging
 import argparse
 from image_processing import preprocess_image, postprocess_image
 from common import create_logger, setup_decoder, setup_encoder, PipelineParams
-from tensorRT_model import TensorRT_model
 
 
 def get_index_indicator(idx_indicator):
@@ -94,10 +93,15 @@ def LANet(params, frames_buffer, encQ, decQ):
     logger = create_logger(params.logger_name)
     logger.info('LANet process started')
 
-    if not params.disable_onnx:
-      #import onnxruntime as onnxrt
-      #session = onnxrt.InferenceSession(params.model_pth, None, providers=params.providers)
-      model = TensorRT_model(params.model_pth, [1] + params.arr_shape)
+    if not params.disable_model:
+      if params.model_type == "onnx":
+        from ONNX_model import ONNX_model
+        model = ONNX_model(params.model_pth, params.providers)
+        import onnxruntime as onnxrt
+        session = onnxrt.InferenceSession(params.model_pth, None, providers=params.providers)
+      elif params.model_type == "plan":
+        from tensorRT_model import TensorRT_model
+        model = TensorRT_model(params.model_pth, [1] + params.arr_shape) # batchsize of 1
 
     while True: 
       logger.debug("decQ size: {} encQ size: {}".format(decQ.qsize(), encQ.qsize()))
@@ -109,14 +113,11 @@ def LANet(params, frames_buffer, encQ, decQ):
       frame = np.frombuffer(frames_buffer[idx], dtype=np.float32).reshape([1] + params.arr_shape)
 
       logger.debug('Inference started')
-      if params.disable_onnx:
+      if params.disable_model:
         output = frame.reshape(params.arr_shape)
         time.sleep(0.5)
       else:
-        #onnx_inputs = {session.get_inputs()[0].name: frame}
-        #onnx_output = session.run(None, onnx_inputs)
-        #output = onnx_output[0].astype(np.float32)
-        output = model(frame)
+        output = model.run_model(frame)
 
       logger.debug('Inference Stopped')
       np.copyto(frames_buffer[idx], output)
